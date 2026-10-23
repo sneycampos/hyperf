@@ -64,7 +64,7 @@ class Executor
     public function execute(Crontab $crontab)
     {
         try {
-            $diff = Carbon::now()->floatDiffInRealSeconds($crontab->getExecuteTime(), false); // @phpstan-ignore-line
+            $diff = $this->getExecuteDelay($crontab->getExecuteTime());
             $runnable = null;
 
             switch ($crontab->getType()) {
@@ -86,7 +86,11 @@ class Executor
                     }
                     break;
                 case 'command':
-                    $input = make(ArrayInput::class, [$crontab->getCallback()]);
+                    $parameters = $crontab->getCallback();
+                    if (! isset($parameters['--disable-event-dispatcher'])) {
+                        $parameters['--disable-event-dispatcher'] = true;
+                    }
+                    $input = make(ArrayInput::class, [$parameters]);
                     $output = make(NullOutput::class);
                     /** @var Application */
                     $application = $this->container->get(ApplicationInterface::class);
@@ -123,6 +127,16 @@ class Executor
             $crontab->close();
             throw $exception;
         }
+    }
+
+    protected function getExecuteDelay(?Carbon $executeTime): float
+    {
+        $now = Carbon::now();
+        if (method_exists($now, 'diffInRealMicroseconds')) {
+            return $now->diffInRealMicroseconds($executeTime, false) / Carbon::MICROSECONDS_PER_SECOND;
+        }
+
+        return $now->diffInSeconds($executeTime, false);
     }
 
     protected function runInSingleton(Crontab $crontab, Closure $runnable): Closure
