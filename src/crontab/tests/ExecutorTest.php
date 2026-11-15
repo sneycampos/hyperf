@@ -107,6 +107,15 @@ class ExecutorTest extends TestCase
         $this->assertEquals('ok', $chan->pop());
     }
 
+    public function testExecuteCommandDisableEventDispatcher()
+    {
+        $this->assertTrue($this->executeCommandOption(['command' => 'demo']));
+        $this->assertFalse($this->executeCommandOption([
+            'command' => 'demo',
+            '--disable-event-dispatcher' => false,
+        ]));
+    }
+
     public function testExecuteClosure()
     {
         $container = $this->getContainer();
@@ -126,30 +135,70 @@ class ExecutorTest extends TestCase
         $this->assertEquals('closure', $chan->pop());
     }
 
-    // public function testDiffInRealSeconds()
-    // {
-    //     $now = Carbon::now();
-    //     $res = $now->clone()->addSeconds(30)->diffInRealSeconds();
-    //     $this->assertSame(30, $res);
+    private function executeCommandOption(array $callback): bool
+    {
+        $chan = new Channel(1);
+        $command = new class($chan) extends Command {
+            private $chan;
 
-    //     $now = Carbon::now();
-    //     $res = $now->clone()->addSeconds(35)->diffInRealSeconds(new Carbon());
-    //     $this->assertSame(35, $res);
+            public function __construct(Channel $chan)
+            {
+                parent::__construct('demo');
+                $this->chan = $chan;
+            }
 
-    //     $now = Carbon::now();
-    //     $res = $now->clone()->addSeconds(-20)->diffInRealSeconds(new Carbon());
-    //     $this->assertSame(20, $res);
+            public function handle()
+            {
+                $this->chan->push($this->input->getOption('disable-event-dispatcher'));
+            }
+        };
 
-    //     $now = Carbon::now();
-    //     $res = $now->clone()->addSeconds(-20)->diffInRealSeconds(new Carbon(), false);
-    //     $this->assertSame(20, $res);
+        $container = $this->getContainer();
+        $app = new Application();
+        $app->add($command);
+        $container->shouldReceive('get')->with(ApplicationInterface::class)->andReturn($app);
 
-    //     $now = Carbon::now();
-    //     $res = $now->diffInRealSeconds($now->clone()->addSeconds(30), false);
-    //     $this->assertSame(30, $res);
+        $crontab = Mockery::mock(Crontab::class);
+        $crontab->shouldReceive('getExecuteTime')->andReturn(Carbon::now());
+        $crontab->shouldReceive('getType')->andReturn('command');
+        $crontab->shouldReceive('isSingleton')->andReturnFalse();
+        $crontab->shouldReceive('isOnOneServer')->andReturnFalse();
+        $crontab->shouldReceive('getCallback')->andReturn($callback);
+        $crontab->shouldReceive('complete')->andReturnNull();
+        (new Executor($container))->execute($crontab);
 
-    //     $now = Carbon::now();
-    //     $res = $now->diffInRealSeconds($now->clone()->addSeconds(-30), false);
-    //     $this->assertSame(-30, $res);
-    // }
+        return $chan->pop();
+    }
+
+    public function testExecuteDelayIsSignedSubSecond()
+    {
+        $executor = new class($this->getContainer()) extends Executor {
+            public function delay(?Carbon $executeTime): float
+            {
+                return $this->getExecuteDelay($executeTime);
+            }
+        };
+
+        $deprecations = [];
+        set_error_handler(static function (int $severity, string $message) use (&$deprecations): bool {
+            if ($severity === E_USER_DEPRECATED || $severity === E_DEPRECATED) {
+                $deprecations[] = $message;
+
+                return true;
+            }
+
+            return false;
+        });
+
+        try {
+            Carbon::setTestNow(Carbon::parse('2024-06-01 12:00:00'));
+            $this->assertEqualsWithDelta(1.5, $executor->delay(Carbon::parse('2024-06-01 12:00:01.500000')), 0.000001);
+            $this->assertEqualsWithDelta(-0.25, $executor->delay(Carbon::parse('2024-06-01 11:59:59.750000')), 0.000001);
+        } finally {
+            restore_error_handler();
+            Carbon::setTestNow(null);
+        }
+
+        $this->assertSame([], $deprecations);
+    }
 }
